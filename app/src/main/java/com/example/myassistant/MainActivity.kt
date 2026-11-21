@@ -18,6 +18,39 @@ class MainActivity : Activity() {
     private lateinit var nameField: EditText
     private lateinit var baseField: EditText
     private lateinit var keyField: EditText
+    private lateinit var voiceStatus: TextView
+    @Volatile private var downloading = false
+
+    private fun refreshVoiceStatus() {
+        voiceStatus.text = if (VoiceModel.isReady(this)) {
+            "Голосовая модель установлена."
+        } else {
+            "Модель не скачана. Подключитесь к Wi-Fi и нажмите кнопку ниже."
+        }
+    }
+
+    private fun downloadVoiceModel() {
+        if (downloading) return
+        if (VoiceModel.isReady(this)) {
+            Toast.makeText(this, "Модель уже установлена", Toast.LENGTH_SHORT).show()
+            return
+        }
+        downloading = true
+        Thread {
+            try {
+                VoiceModel.download(this) { msg ->
+                    runOnUiThread { voiceStatus.text = msg }
+                }
+                runOnUiThread { refreshVoiceStatus() }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    voiceStatus.text = "Ошибка загрузки: ${e.message}. Попробуйте ещё раз."
+                }
+            } finally {
+                downloading = false
+            }
+        }.start()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -80,6 +113,17 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Сохранено", Toast.LENGTH_SHORT).show()
         }
         root.addView(save)
+
+        root.addView(label("Голос (работает без интернета и без Google)"))
+        voiceStatus = TextView(this)
+        voiceStatus.textSize = 14f
+        refreshVoiceStatus()
+        root.addView(voiceStatus)
+
+        val dl = Button(this)
+        dl.text = "Скачать голосовую модель (около 50 МБ)"
+        dl.setOnClickListener { downloadVoiceModel() }
+        root.addView(dl)
 
         val start = Button(this)
         start.text = "Запустить"

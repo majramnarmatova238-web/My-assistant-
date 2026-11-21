@@ -11,8 +11,12 @@ android {
         applicationId = "com.example.myassistant"
         minSdk = 26
         targetSdk = 33
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.2"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     compileOptions {
@@ -23,4 +27,9 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+dependencies {
+    implementation("net.java.dev.jna:jna:5.13.0@aar")
+    implementation("com.alphacephei:vosk-android:0.3.47")
 }

@@ -10,6 +10,9 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
@@ -30,6 +33,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 import org.json.JSONArray
 import org.json.JSONObject
+import org.vosk.Model
+import org.vosk.Recognizer
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
@@ -50,6 +55,10 @@ class FloatingService : Service(), TextToSpeech.OnInitListener {
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var recognizer: SpeechRecognizer? = null
+    private var micButton: Button? = null
+    private var voiceModel: Model? = null
+    private var listening = false
+    @Volatile private var stopRequested = false
 
     private val history = ArrayList<JSONObject>()
     private val transcript = StringBuilder()
@@ -77,6 +86,7 @@ class FloatingService : Service(), TextToSpeech.OnInitListener {
         bubble = null
         strip = null
         panel = null
+        stopRequested = true
         recognizer?.destroy()
         recognizer = null
         tts?.shutdown()
@@ -287,6 +297,7 @@ class FloatingService : Service(), TextToSpeech.OnInitListener {
         mic.text = "🎤"
         mic.setOnClickListener { listen() }
         row.addView(mic)
+        micButton = mic
 
         val send = Button(this)
         send.text = "➤"
@@ -323,9 +334,11 @@ class FloatingService : Service(), TextToSpeech.OnInitListener {
 
     private fun closePanel() {
         tts?.stop()
+        stopRequested = true
         recognizer?.cancel()
         safeRemove(panel)
         panel = null
+        micButton = null
         chat = null
         scroll = null
         input = null
@@ -344,6 +357,7 @@ class FloatingService : Service(), TextToSpeech.OnInitListener {
         if (status == TextToSpeech.SUCCESS) {
             val r = tts?.setLanguage(Locale("ru", "RU"))
             ttsReady = r != TextToSpeech.LANG_MISSING_DATA && r != TextToSpeech.LANG_NOT_SUPPORTED
+            tts?.setSpeechRate(0.8f)
         }
         if (!ttsReady) {
             append("(Голос не настроен: в настройках телефона установите синтез речи с русским языком.)")
@@ -364,6 +378,90 @@ class FloatingService : Service(), TextToSpeech.OnInitListener {
             append("Дайте разрешение на микрофон: откройте приложение «My Assistant» и разрешите.")
             return
         }
+        if (VoiceModel.isReady(this)) {
+            listenOffline()
+        } else {
+            append("Голосовая модель не скачана: откройте приложение «My Assistant» и нажмите «Скачать голосовую модель». Пока пробую голос Google.")
+            listenGoogle()
+        }
+    }
+
+    // Офлайн-распознавание (Vosk): не зависит от Google и интернета.
+    private fun listenOffline() {
+        if (listening) {
+            stopRequested = true
+            return
+        }
+        listening = true
+        stopRequested = false
+        micButton?.text = "⏹"
+        input?.hint = "Говорите..."
+        val modelPath = VoiceModel.dir(this).absolutePath
+        Thread {
+            var text = ""
+            var error: String? = null
+            try {
+                val m = voiceModel ?: Model(modelPath).also { voiceModel = it }
+                val rec = Recognizer(m, 16000.0f)
+                val minBuf = AudioRecord.getMinBufferSize(
+                    16000,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+                val ar = AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    16000,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    maxOf(minBuf, 8000) * 2
+                )
+                if (ar.state != AudioRecord.STATE_INITIALIZED) {
+                    rec.close()
+                    throw Exception("микрофон недоступен")
+                }
+                ar.startRecording()
+                val buf = ByteArray(4096)
+                val start = System.currentTimeMillis()
+                while (!stopRequested && System.currentTimeMillis() - start < 15000) {
+                    val n = ar.read(buf, 0, buf.size)
+                    if (n <= 0) continue
+                    if (rec.acceptWaveForm(buf, n)) {
+                        text = JSONObject(rec.result).optString("text")
+                        if (text.isNotBlank()) break
+                    } else {
+                        val p = JSONObject(rec.partialResult).optString("partial")
+                        if (p.isNotBlank()) {
+                            handler.post { input?.setText(p) }
+                        }
+                    }
+                }
+                ar.stop()
+                ar.release()
+                if (text.isBlank()) {
+                    text = JSONObject(rec.finalResult).optString("text")
+                }
+                rec.close()
+            } catch (e: Throwable) {
+                error = e.message ?: e.javaClass.simpleName
+            }
+            handler.post {
+                listening = false
+                micButton?.text = "🎤"
+                input?.setText("")
+                input?.hint = "Напишите или нажмите микрофон"
+                if (error != null) {
+                    append("Ошибка голоса: $error")
+                } else if (text.isBlank()) {
+                    append("Не расслышал. Попробуйте ещё раз.")
+                } else {
+                    ask(text)
+                }
+            }
+        }.start()
+    }
+
+    // Запасной вариант: голос Google (может не работать на этом телефоне).
+    private fun listenGoogle() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             append("На телефоне нет службы распознавания речи. Пишите текстом.")
             return
